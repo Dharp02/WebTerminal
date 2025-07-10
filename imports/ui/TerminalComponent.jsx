@@ -4,7 +4,7 @@ import { FitAddon } from 'xterm-addon-fit';
 import io from 'socket.io-client';
 import 'xterm/css/xterm.css';
 
-// Original TerminalComponent (unchanged)
+// Original TerminalComponent
 const TerminalComponent = ({ 
   show = true, 
   host = 'localhost', 
