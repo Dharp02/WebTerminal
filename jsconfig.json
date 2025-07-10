@@ -1,0 +1,75 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "allowJs": true,
+    "jsx": "react",
+    "baseUrl": ".",
+    "paths": {
+      "/*": [
+        "./*"
+      ],
+      "meteor/mongo": [
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/local_collection_driver.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/collection/collection.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/asynchronous_cursor.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/doc_fetcher.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/mongo_common.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/mongo_connection.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/mongo_driver.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/mongo_utils.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/oplog_observe_driver.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/collection/collection_utils.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/collection/methods_async.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/collection/methods_index.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/collection/methods_replication.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/collection/methods_sync.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/mongo/2.1.2/web.browser/collection/watch_change_stream.js"
+      ],
+      "meteor/reactive-var": [
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/reactive-var/1.0.13/web.browser/reactive-var.js"
+      ],
+      "meteor/es5-shim": [
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/es5-shim/4.8.1/web.browser/client.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/es5-shim/4.8.1/web.browser/console.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/es5-shim/4.8.1/web.browser/cordova.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/es5-shim/4.8.1/web.browser/export_globals.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/es5-shim/4.8.1/web.browser/import_globals.js"
+      ],
+      "meteor/ecmascript": [
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/ecmascript/0.16.11/web.browser/ecmascript.js"
+      ],
+      "meteor/shell-server": [
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/shell-server/0.6.1/web.browser/main.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/shell-server/0.6.1/web.browser/shell-server.js"
+      ],
+      "meteor/hot-module-replacement": [
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/hot-module-replacement/0.5.4/web.browser/hot-api.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/hot-module-replacement/0.5.4/web.browser/client.js",
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/hot-module-replacement/0.5.4/web.browser/server.js"
+      ],
+      "meteor/react-meteor-data": [
+        "C:\\Users\\dhara\\AppData\\Local/.meteor/packages/react-meteor-data/4.0.0/web.browser/suspense/index.js"
+      ],
+      "meteor/my-package": [
+        "packages\\my-package\\my-package.js"
+      ],
+      "meteor/dharapo:hello-world": [
+        "packages\\my-package\\client\\TerminalComponent.jsx",
+        "packages\\my-package\\server\\methods.js"
+      ],
+      "meteor/dharapo:terminal": [
+        "packages\\my-package\\client\\TerminalComponent.jsx",
+        "packages\\my-package\\server\\main.js"
+      ]
+    }
+  },
+  "typeAcquisition": {
+    "include": [
+      "meteor"
+    ]
+  },
+  "exclude": [
+    "node_modules",
+    ".meteor"
+  ]
+}
