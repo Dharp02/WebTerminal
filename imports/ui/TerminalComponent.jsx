@@ -4,6 +4,7 @@ import { FitAddon } from 'xterm-addon-fit';
 import io from 'socket.io-client';
 import 'xterm/css/xterm.css';
 
+// Original TerminalComponent (unchanged)
 const TerminalComponent = ({ 
   show = true, 
   host = 'localhost', 
@@ -30,7 +31,7 @@ const TerminalComponent = ({
   const autoConnectAttempted = useRef(false);
   const reconnectTimeout = useRef(null);
   const componentMounted = useRef(true);
-  const initializationComplete = useRef(false); // Track if we've initialized
+  const initializationComplete = useRef(false);
   
   const [isConnected, setIsConnected] = useState(externalIsConnected);
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
@@ -78,7 +79,7 @@ const TerminalComponent = ({
     }
   }, []);
 
-  // Handle local input when not connected - using useCallback with empty deps
+  // Handle local input when not connected
   const handleLocalInput = useCallback((data) => {
     if (!term.current || !componentMounted.current) return;
 
@@ -94,9 +95,9 @@ const TerminalComponent = ({
     } else {
       term.current.write(data);
     }
-  }, []); // Empty dependencies - this function doesn't need to recreate
+  }, []);
 
-  // Setup resize observer - stable version
+  // Setup resize observer
   const setupResizeObserver = useCallback(() => {
     if (resizeObserver.current) {
       resizeObserver.current.disconnect();
@@ -121,9 +122,9 @@ const TerminalComponent = ({
     if (terminalRef.current) {
       resizeObserver.current.observe(terminalRef.current);
     }
-  }, []); // Empty dependencies
+  }, []);
 
-  // Initialize terminal - stable version that doesn't depend on changing state
+  // Initialize terminal
   const initializeTerminal = useCallback(() => {
     if (!terminalRef.current || !componentMounted.current || initializationComplete.current) {
       return;
@@ -131,7 +132,6 @@ const TerminalComponent = ({
 
     console.log('[TERMINAL] Initializing terminal');
 
-    // Create new terminal
     term.current = new Terminal({
       fontSize: 14,
       fontFamily: 'Monaco, Menlo, "DejaVu Sans Mono", "Lucida Console", monospace',
@@ -147,23 +147,15 @@ const TerminalComponent = ({
       altClickMovesCursor: false
     });
 
-    // Load addons
     term.current.loadAddon(fitAddon.current);
-    
-    // Open terminal
     term.current.open(terminalRef.current);
 
-    // Write welcome message
     term.current.writeln('\x1b[36m╭─────────────────────────────────────╮\x1b[0m');
     term.current.writeln('\x1b[36m│        SSH Terminal Component        │\x1b[0m');
     term.current.writeln('\x1b[36m╰─────────────────────────────────────╯\x1b[0m');
     term.current.writeln('\x1b[32mReady to connect...\x1b[0m');
     term.current.writeln('\x1b[90mPress Ctrl+C to interrupt, type "exit" to disconnect\x1b[0m\r\n');
 
-    // Setup resize observer
-   // setupResizeObserver();
-
-    // Handle terminal input
     term.current.onData(data => {
       if (socket.current && socket.current.connected) {
         socket.current.emit('terminal:input', data);
@@ -177,7 +169,6 @@ const TerminalComponent = ({
       }
     });
 
-    // Handle selection for copy/paste
     term.current.onSelectionChange(() => {
       const selection = term.current.getSelection();
       if (selection) {
@@ -187,7 +178,6 @@ const TerminalComponent = ({
       }
     });
 
-    // Initial fit and focus
     setTimeout(() => {
       if (fitAddon.current && componentMounted.current) {
         try {
@@ -203,9 +193,9 @@ const TerminalComponent = ({
 
     initializationComplete.current = true;
     console.log('[TERMINAL] Terminal initialized successfully');
-  }, [theme, handleLocalInput]); // Only depend on stable things
+  }, [theme, handleLocalInput]);
 
-  // Setup socket connection - stable version
+  // Setup socket connection
   const setupSocketConnection = useCallback(() => {
     if (!componentMounted.current || socket.current) {
       return;
@@ -312,7 +302,7 @@ const TerminalComponent = ({
     });
 
     console.log('[TERMINAL] Socket event handlers set up');
-  }, [onConnect, onDisconnect, onStatusChange, clearReconnectTimeout]); // Stable dependencies
+  }, [onConnect, onDisconnect, onStatusChange, clearReconnectTimeout]);
 
   // Connect to SSH
   const connectSSH = useCallback(() => {
@@ -322,10 +312,8 @@ const TerminalComponent = ({
 
     console.log('[TERMINAL] Starting SSH connection');
 
-    // Clear any previous errors
     setConnectionError(null);
 
-    // Validate inputs
     if (!host.trim() || !username.trim() || (!password.trim() && !useKeyAuth)) {
       const errorMsg = 'Missing required connection parameters';
       setConnectionError(errorMsg);
@@ -413,7 +401,7 @@ const TerminalComponent = ({
     };
   }, []);
 
-  // Main initialization effect - ONLY runs once when component mounts and show becomes true
+  // Main initialization effect
   useEffect(() => {
     if (!show || !componentMounted.current || initializationComplete.current) {
       return;
@@ -421,11 +409,9 @@ const TerminalComponent = ({
     
     console.log('[TERMINAL] Running main initialization effect');
     
-    // Initialize terminal and socket
     initializeTerminal();
     setupSocketConnection();
     
-    // Cleanup function
     return () => {
       console.log('[TERMINAL] Main effect cleanup');
       clearReconnectTimeout();
@@ -449,9 +435,9 @@ const TerminalComponent = ({
       
       initializationComplete.current = false;
     };
-  }, [show]); // ONLY depend on show prop
+  }, [show]);
 
-  // Auto-connect effect (only once)
+  // Auto-connect effect
   useEffect(() => {
     if (autoConnect && socket.current && !isConnected && !isConnecting && 
         !autoConnectAttempted.current && componentMounted.current && 
@@ -646,4 +632,287 @@ const TerminalComponent = ({
   );
 };
 
-export default TerminalComponent;
+// New ResizableTerminal component that wraps TerminalComponent
+const ResizableTerminal = ({
+  host = 'localhost',
+  username = 'vboxuser',
+  password = 'changeme',
+  port = 2022,
+  autoConnect = true,
+  theme = 'dark',
+  onConnect,
+  onDisconnect,
+  onStatusChange,
+  initialHeight = 300,
+  initialWidth = 100,
+  minHeight = 100,
+  maxHeight = 0.8,
+  minWidth = 30,
+  maxWidth = 100
+}) => {
+  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
+  const [terminalHeight, setTerminalHeight] = useState(initialHeight);
+  const [terminalWidth, setTerminalWidth] = useState(initialWidth);
+  const [isResizing, setIsResizing] = useState(false);
+  const [isResizingWidth, setIsResizingWidth] = useState(false);
+  const resizerRef = useRef(null);
+  const widthResizerRef = useRef(null);
+  const containerRef = useRef(null);
+
+  const handleMouseDown = (e) => {
+    setIsResizing(true);
+    e.preventDefault();
+  };
+
+  const handleWidthMouseDown = (e) => {
+    setIsResizingWidth(true);
+    e.preventDefault();
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (isResizing && containerRef.current) {
+        const newHeight = window.innerHeight - e.clientY;
+        const minHeightPx = minHeight;
+        const maxHeightPx = window.innerHeight * maxHeight;
+        
+        if (newHeight >= minHeightPx && newHeight <= maxHeightPx) {
+          setTerminalHeight(newHeight);
+        }
+      }
+
+      if (isResizingWidth) {
+        const newWidth = ((window.innerWidth - e.clientX) / window.innerWidth) * 100;
+        if (newWidth >= minWidth && newWidth <= maxWidth) {
+          setTerminalWidth(newWidth);
+        }
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      setIsResizingWidth(false);
+    };
+
+    if (isResizing || isResizingWidth) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing, isResizingWidth, minHeight, maxHeight, minWidth, maxWidth]);
+
+  const toggleTerminal = () => {
+    setIsTerminalOpen(!isTerminalOpen);
+  };
+
+  return (
+    <div 
+      ref={containerRef}
+      style={{
+        position: 'fixed',
+        bottom: 0,
+        right: 0,
+        width: `${terminalWidth}%`,
+        zIndex: 1000,
+        display: 'flex',
+        flexDirection: 'column',
+        backgroundColor: 'transparent',
+        fontFamily: 'Monaco, Menlo, "DejaVu Sans Mono", "Lucida Console", monospace',
+        pointerEvents: 'none'
+      }}
+    >
+      {/* Width Resizer */}
+      {isTerminalOpen && (
+        <div
+          ref={widthResizerRef}
+          onMouseDown={handleWidthMouseDown}
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: '4px',
+            backgroundColor: isResizingWidth ? '#007acc' : 'transparent',
+            cursor: 'col-resize',
+            transition: 'background-color 0.2s ease',
+            zIndex: 11,
+            pointerEvents: 'auto'
+          }}
+          onMouseEnter={(e) => {
+            if (!isResizingWidth) {
+              e.target.style.backgroundColor = '#007acc40';
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (!isResizingWidth) {
+              e.target.style.backgroundColor = 'transparent';
+            }
+          }}
+        />
+      )}
+
+      {/* Terminal Panel */}
+      <div style={{
+        borderTop: '1px solid #464647',
+        backgroundColor: '#1e1e1e',
+        display: 'flex',
+        flexDirection: 'column',
+        height: isTerminalOpen ? terminalHeight : 35,
+        minHeight: isTerminalOpen ? minHeight : 35,
+        transition: isTerminalOpen ? 'none' : 'height 0.2s ease',
+        position: 'relative',
+        pointerEvents: 'auto',
+        boxShadow: '0 -2px 8px rgba(0, 0, 0, 0.3)'
+      }}>
+        {/* Height Resizer */}
+        {isTerminalOpen && (
+          <div
+            ref={resizerRef}
+            onMouseDown={handleMouseDown}
+            style={{
+              height: '4px',
+              backgroundColor: isResizing ? '#007acc' : 'transparent',
+              cursor: 'row-resize',
+              transition: 'background-color 0.2s ease',
+              position: 'relative',
+              zIndex: 10
+            }}
+            onMouseEnter={(e) => {
+              if (!isResizing) {
+                e.target.style.backgroundColor = '#007acc40';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!isResizing) {
+                e.target.style.backgroundColor = 'transparent';
+              }
+            }}
+          />
+        )}
+
+        {/* Terminal Header */}
+        <div style={{
+          height: '35px',
+          backgroundColor: '#2d2d30',
+          borderBottom: isTerminalOpen ? '1px solid #464647' : 'none',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 15px',
+          fontSize: '13px',
+          color: '#cccccc'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <button
+              onClick={toggleTerminal}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: '#cccccc',
+                cursor: 'pointer',
+                fontSize: '16px',
+                padding: '2px',
+                display: 'flex',
+                alignItems: 'center',
+                transform: isTerminalOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
+                transition: 'transform 0.2s ease'
+              }}
+            >
+              ▼
+            </button>
+            <span style={{ fontWeight: '500' }}>TERMINAL</span>
+            {isTerminalOpen && (
+              <span style={{ 
+                fontSize: '11px', 
+                color: '#999',
+                backgroundColor: '#464647',
+                padding: '2px 6px',
+                borderRadius: '3px'
+              }}>
+                SSH
+              </span>
+            )}
+          </div>
+          
+          {isTerminalOpen && (
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                onClick={toggleTerminal}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#cccccc',
+                  cursor: 'pointer',
+                  fontSize: '16px',
+                  padding: '4px',
+                  borderRadius: '3px',
+                  opacity: 0.7
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.backgroundColor = '#464647';
+                  e.target.style.opacity = '1';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.backgroundColor = 'transparent';
+                  e.target.style.opacity = '0.7';
+                }}
+                title="Close Panel"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Terminal Content */}
+        {isTerminalOpen && (
+          <div style={{
+            flex: 1,
+            backgroundColor: '#1e1e1e',
+            overflow: 'hidden'
+          }}>
+            <TerminalComponent 
+              show={true}
+              host={host}
+              username={username}
+              password={password}
+              port={port}
+              autoConnect={autoConnect}
+              theme={theme}
+              onConnect={onConnect}
+              onDisconnect={onDisconnect}
+              onStatusChange={onStatusChange}
+              style={{
+                height: '100%',
+                border: 'none',
+                borderRadius: '0'
+              }}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Resizing overlay */}
+      {(isResizing || isResizingWidth) && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          cursor: isResizing ? 'row-resize' : 'col-resize',
+          backgroundColor: 'rgba(0, 0, 0, 0.1)',
+          zIndex: 9999
+        }} />
+      )}
+    </div>
+  );
+};
+
+// Export both components
+export default ResizableTerminal;
+export { TerminalComponent };
