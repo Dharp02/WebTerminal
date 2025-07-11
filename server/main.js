@@ -1,7 +1,9 @@
+// server/main.js
 import { Meteor } from 'meteor/meteor';
 import { WebApp } from 'meteor/webapp';
 import { Server } from 'socket.io';
 import { Client } from 'ssh2';
+import { getDockerManager } from './dockermanager.js';
 
 // Terminal server class for handling SSH connections
 export class TerminalServer {
@@ -10,6 +12,7 @@ export class TerminalServer {
     this.io = null;
     this.cleanupInterval = null;
     this.healthInterval = null;
+    this.dockerManager = getDockerManager();
     this.initialize();
   }
 
@@ -39,7 +42,7 @@ export class TerminalServer {
     // Start health monitoring
     this.startHealthMonitoring();
 
-    console.log('Terminal server initialized with health monitoring');
+    console.log('Terminal server initialized with health monitoring and Docker support');
   }
 
   handleConnection(socket) {
@@ -76,6 +79,42 @@ export class TerminalServer {
       await this.handleSSHConnect(socket, credentials);
     });
 
+    // Handle container creation request
+    socket.on('terminal:create-container', async () => {
+      if (!isSocketConnected) return;
+      
+      try {
+        console.log(`[TERMINAL] Creating container for client: ${socket.id}`);
+        socket.emit('terminal:container-creating', { message: 'Creating your container...' });
+        
+        const containerInfo = await this.dockerManager.createSSHContainer();
+        
+        // Automatically connect to the new container
+        const credentials = {
+          host: containerInfo.host,
+          port: containerInfo.port,
+          username: containerInfo.username,
+          password: containerInfo.password,
+          containerId: containerInfo.containerId
+        };
+        
+        socket.emit('terminal:container-created', containerInfo);
+        
+        // Wait a moment for the container to be fully ready, then connect
+        setTimeout(() => {
+          if (isSocketConnected) {
+            this.handleSSHConnect(socket, credentials);
+          }
+        }, 2000);
+        
+      } catch (error) {
+        console.error('[TERMINAL] Container creation failed:', error);
+        socket.emit('terminal:error', { 
+          message: `Failed to create container: ${error.message}` 
+        });
+      }
+    });
+
     // Handle terminal input
     socket.on('terminal:input', (data) => {
       if (!isSocketConnected) return;
@@ -107,6 +146,10 @@ export class TerminalServer {
       const session = this.activeSessions.get(socket.id);
       if (session) {
         session.lastActivity = new Date();
+        // Update container activity if it's a container session
+        if (session.containerId) {
+          this.dockerManager.updateContainerActivity(session.containerId);
+        }
       }
       socket.emit('pong'); // Respond to ping
     });
@@ -154,8 +197,9 @@ export class TerminalServer {
         connectedAt: new Date(),
         lastActivity: new Date(),
         socketId: socketId,
-        isConnecting: true, // Add connection state flag
-        isConnected: false
+        isConnecting: true,
+        isConnected: false,
+        containerId: credentials.containerId || null // Track if this is a container session
       };
 
       this.activeSessions.set(socketId, session);
@@ -242,7 +286,8 @@ export class TerminalServer {
           socket.emit('terminal:connected', { 
             host: credentials.host,
             port: credentials.port,
-            username: credentials.username
+            username: credentials.username,
+            containerId: credentials.containerId || null
           });
 
           // Handle stream data with error checking
@@ -250,6 +295,10 @@ export class TerminalServer {
             try {
               socket.emit('terminal:output', data.toString());
               session.lastActivity = new Date();
+              // Update container activity if it's a container session
+              if (session.containerId) {
+                this.dockerManager.updateContainerActivity(session.containerId);
+              }
             } catch (error) {
               console.error('Error sending data to client:', error);
               this.handleSSHDisconnect(socketId);
@@ -260,6 +309,10 @@ export class TerminalServer {
             try {
               socket.emit('terminal:output', data.toString());
               session.lastActivity = new Date();
+              // Update container activity if it's a container session
+              if (session.containerId) {
+                this.dockerManager.updateContainerActivity(session.containerId);
+              }
             } catch (error) {
               console.error('Error sending stderr to client:', error);
               this.handleSSHDisconnect(socketId);
@@ -340,10 +393,7 @@ export class TerminalServer {
         readyTimeout: 30000,
         keepaliveInterval: 30000,
         keepaliveCountMax: 3,
-        // Enable agent forwarding if available
         agentForward: false,
-        // Disable server host key verification for local development
-        // In production, you should verify host keys properly
         hostVerifier: () => true
       };
 
@@ -371,6 +421,10 @@ export class TerminalServer {
       try {
         session.stream.write(data);
         session.lastActivity = new Date();
+        // Update container activity if it's a container session
+        if (session.containerId) {
+          this.dockerManager.updateContainerActivity(session.containerId);
+        }
       } catch (error) {
         console.error('Error writing to stream:', error);
         this.handleSSHDisconnect(socketId);
@@ -401,11 +455,11 @@ export class TerminalServer {
       
       try {
         if (session.stream && session.stream.writable) {
-          session.stream.removeAllListeners(); // Remove event listeners first
+          session.stream.removeAllListeners();
           session.stream.end();
         }
         if (session.conn) {
-          session.conn.removeAllListeners(); // Remove event listeners first
+          session.conn.removeAllListeners();
           session.conn.end();
         }
       } catch (error) {
@@ -448,12 +502,12 @@ export class TerminalServer {
   }
 
   sanitizeCredentials(credentials) {
-    // Remove sensitive information for logging
     return {
       host: credentials.host,
       port: credentials.port,
       username: credentials.username,
-      useKeyAuth: credentials.useKeyAuth || false
+      useKeyAuth: credentials.useKeyAuth || false,
+      containerId: credentials.containerId || null
     };
   }
 
@@ -479,7 +533,8 @@ export class TerminalServer {
         idleTime: Math.floor(idleTime / 1000), // seconds
         isActive: idleTime < 300000, // 5 minutes
         isConnecting: session.isConnecting,
-        isConnected: session.isConnected
+        isConnected: session.isConnected,
+        containerId: session.containerId
       });
     }
 
@@ -597,6 +652,9 @@ export class TerminalServer {
       Meteor.clearInterval(this.healthInterval);
     }
     
+    // Shutdown Docker manager
+    this.dockerManager.shutdown();
+    
     // Close all active sessions gracefully
     const disconnectPromises = [];
     for (const [socketId, session] of this.activeSessions) {
@@ -652,6 +710,96 @@ WebApp.connectHandlers.use('/api/terminal-stats', (req, res) => {
   }
 });
 
+// API endpoint for Docker container statistics
+WebApp.connectHandlers.use('/api/container-stats', (req, res) => {
+  try {
+    const dockerManager = getDockerManager();
+    const stats = dockerManager.getContainerStats();
+    
+    res.writeHead(200, { 
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*'
+    });
+    res.end(JSON.stringify(stats));
+  } catch (error) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+});
+
+// API endpoint to create a new container
+WebApp.connectHandlers.use('/api/create', (req, res) => {
+  if (req.method !== 'POST') {
+    res.writeHead(405, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Method not allowed' }));
+    return;
+  }
+
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  
+  // Handle preflight request
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
+  try {
+    console.log('[API] Container creation request received');
+    
+    const dockerManager = getDockerManager();
+    
+    // Check Docker availability first
+    dockerManager.checkDockerAvailability().then(isAvailable => {
+      if (!isAvailable) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          success: false, 
+          error: 'Docker is not available on this system' 
+        }));
+        return;
+      }
+
+      // Create container
+      dockerManager.createSSHContainer().then(containerInfo => {
+        console.log('[API] Container created successfully:', containerInfo);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          container: containerInfo,
+          message: 'Container created successfully'
+        }));
+      }).catch(error => {
+        console.error('[API] Container creation failed:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          success: false, 
+          error: error.message 
+        }));
+      });
+    }).catch(error => {
+      console.error('[API] Docker availability check failed:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ 
+        success: false, 
+        error: 'Failed to check Docker availability' 
+      }));
+    });
+    
+  } catch (error) {
+    console.error('[API] Unexpected error:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      success: false, 
+      error: 'Internal server error' 
+    }));
+  }
+});
+
 // API endpoint to force disconnect a session
 WebApp.connectHandlers.use('/api/terminal-disconnect', (req, res) => {
   if (req.method !== 'POST') {
@@ -677,6 +825,52 @@ WebApp.connectHandlers.use('/api/terminal-disconnect', (req, res) => {
           'Access-Control-Allow-Origin': '*'
         });
         res.end(JSON.stringify({ success, message: success ? 'Session disconnected' : 'Session not found' }));
+      } catch (parseError) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+      }
+    });
+  } catch (error) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+});
+
+// API endpoint to stop a container
+WebApp.connectHandlers.use('/api/container-stop', (req, res) => {
+  if (req.method !== 'POST') {
+    res.writeHead(405, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Method not allowed' }));
+    return;
+  }
+
+  try {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+
+    req.on('end', () => {
+      try {
+        const { containerId } = JSON.parse(body);
+        const dockerManager = getDockerManager();
+        
+        dockerManager.stopContainer(containerId).then(() => {
+          res.writeHead(200, { 
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          });
+          res.end(JSON.stringify({ 
+            success: true, 
+            message: 'Container stopped successfully' 
+          }));
+        }).catch(error => {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ 
+            success: false, 
+            error: error.message 
+          }));
+        });
       } catch (parseError) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid JSON body' }));
@@ -716,7 +910,8 @@ WebApp.connectHandlers.use('/api/terminal-session', (req, res) => {
       lastActivity: session.lastActivity,
       duration: Date.now() - session.connectedAt.getTime(),
       isConnecting: session.isConnecting,
-      isConnected: session.isConnected
+      isConnected: session.isConnected,
+      containerId: session.containerId
     };
     
     res.writeHead(200, { 
@@ -734,10 +929,13 @@ WebApp.connectHandlers.use('/api/terminal-session', (req, res) => {
 WebApp.connectHandlers.use('/api/terminal-health', (req, res) => {
   try {
     const server = getTerminalServer();
+    const dockerManager = getDockerManager();
+    
     const health = {
       status: 'healthy',
       uptime: process.uptime(),
       activeSessions: server.activeSessions.size,
+      activeContainers: dockerManager.activeContainers.size,
       timestamp: new Date().toISOString()
     };
     
@@ -759,7 +957,7 @@ WebApp.connectHandlers.use('/api/terminal-health', (req, res) => {
 // Initialize on server startup
 Meteor.startup(() => {
   getTerminalServer();
-  console.log('Terminal server started');
+  console.log('Terminal server started with Docker container support');
   
   // Graceful shutdown
   process.on('SIGINT', () => {

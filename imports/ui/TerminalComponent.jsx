@@ -1,10 +1,11 @@
+// imports/ui/TerminalComponent.jsx
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import io from 'socket.io-client';
 import 'xterm/css/xterm.css';
 
-// Original TerminalComponent
+// Original TerminalComponent with Container Support
 const TerminalComponent = ({ 
   show = true, 
   host = 'localhost', 
@@ -38,6 +39,9 @@ const TerminalComponent = ({
   const [isConnecting, setIsConnecting] = useState(false);
   const [sessionHistory, setSessionHistory] = useState([]);
   const [connectionError, setConnectionError] = useState(null);
+  const [containerInfo, setContainerInfo] = useState(null);
+  const [isCreatingContainer, setIsCreatingContainer] = useState(false);
+  const [useContainer, setUseContainer] = useState(false);
 
   // Terminal themes
   const themes = {
@@ -123,6 +127,11 @@ const TerminalComponent = ({
       resizeObserver.current.observe(terminalRef.current);
     }
   }, []);
+
+  // Check if should use container (when fields are empty)
+  const shouldUseContainer = useCallback(() => {
+    return !host.trim() || host === 'localhost' && !username.trim() && !password.trim();
+  }, [host, username, password]);
 
   // Initialize terminal
   const initializeTerminal = useCallback(() => {
@@ -233,12 +242,38 @@ const TerminalComponent = ({
       setIsConnected(false);
       setConnectionStatus('Disconnected');
       setIsConnecting(false);
+      setIsCreatingContainer(false);
       clearReconnectTimeout();
       onStatusChange?.('disconnected');
       onDisconnect?.();
       
       if (term.current) {
         term.current.writeln(`\r\n\x1b[31m✗ Disconnected from server (${reason})\x1b[0m`);
+      }
+    });
+
+    // Container creation events
+    socket.current.on('terminal:container-creating', (data) => {
+      if (!componentMounted.current) return;
+      console.log('[TERMINAL] Container creation started');
+      setIsCreatingContainer(true);
+      setConnectionStatus('Creating container...');
+      if (term.current) {
+        term.current.writeln('\r\n\x1b[33m→ Creating your container...\x1b[0m');
+      }
+    });
+
+    socket.current.on('terminal:container-created', (data) => {
+      if (!componentMounted.current) return;
+      console.log('[TERMINAL] Container created:', data);
+      setContainerInfo(data);
+      setIsCreatingContainer(false);
+      setConnectionStatus('Container ready');
+      if (term.current) {
+        term.current.writeln(`\r\n\x1b[32m✓ Container created successfully!\x1b[0m`);
+        term.current.writeln(`\x1b[90mContainer ID: ${data.containerId}\x1b[0m`);
+        term.current.writeln(`\x1b[90mSSH Port: ${data.port}\x1b[0m`);
+        term.current.writeln('\x1b[33m→ Connecting to container...\x1b[0m');
       }
     });
 
@@ -260,13 +295,19 @@ const TerminalComponent = ({
       setConnectionStatus('SSH Connected');
       setIsConnected(true);
       setIsConnecting(false);
+      setIsCreatingContainer(false);
       setConnectionError(null);
       clearReconnectTimeout();
       onStatusChange?.('connected');
       onConnect?.();
       
       if (term.current) {
-        term.current.writeln('\r\n\x1b[32m✓ SSH Connection established\x1b[0m');
+        if (data.containerId) {
+          term.current.writeln('\r\n\x1b[32m✓ Connected to your container!\x1b[0m');
+          term.current.writeln(`\x1b[90mContainer: ${data.containerId}\x1b[0m`);
+        } else {
+          term.current.writeln('\r\n\x1b[32m✓ SSH Connection established\x1b[0m');
+        }
         term.current.writeln(`\x1b[90mConnected to ${data.username}@${data.host}:${data.port}\x1b[0m\r\n`);
       }
     });
@@ -275,6 +316,7 @@ const TerminalComponent = ({
       if (!componentMounted.current) return;
       console.log('[TERMINAL] SSH Error:', error.message);
       setIsConnecting(false);
+      setIsCreatingContainer(false);
       setConnectionStatus('Error');
       setConnectionError(error.message);
       clearReconnectTimeout();
@@ -291,6 +333,7 @@ const TerminalComponent = ({
       setIsConnected(false);
       setConnectionStatus('Disconnected');
       setIsConnecting(false);
+      setIsCreatingContainer(false);
       clearReconnectTimeout();
       onStatusChange?.('disconnected');
       onDisconnect?.();
@@ -304,6 +347,23 @@ const TerminalComponent = ({
     console.log('[TERMINAL] Socket event handlers set up');
   }, [onConnect, onDisconnect, onStatusChange, clearReconnectTimeout]);
 
+  // Create container
+  const createContainer = useCallback(() => {
+    if (!componentMounted.current || !socket.current || isCreatingContainer || isConnected) {
+      return;
+    }
+
+    console.log('[TERMINAL] Creating new container');
+    setConnectionError(null);
+    setUseContainer(true);
+    
+    if (term.current) {
+      term.current.writeln('\r\n\x1b[33m→ Requesting new container...\x1b[0m');
+    }
+
+    socket.current.emit('terminal:create-container');
+  }, [isCreatingContainer, isConnected]);
+
   // Connect to SSH
   const connectSSH = useCallback(() => {
     if (!componentMounted.current || !socket.current || isConnecting || isConnected) {
@@ -311,10 +371,42 @@ const TerminalComponent = ({
     }
 
     console.log('[TERMINAL] Starting SSH connection');
-
     setConnectionError(null);
 
-    if (!host.trim() || !username.trim() || (!password.trim() && !useKeyAuth)) {
+    // Check if we should use container mode
+    if (shouldUseContainer() && !containerInfo) {
+      createContainer();
+      return;
+    }
+
+    // Use existing container info or provided credentials
+    const credentials = containerInfo ? {
+      host: containerInfo.host,
+      port: containerInfo.port,
+      username: containerInfo.username,
+      password: containerInfo.password,
+      containerId: containerInfo.containerId
+    } : {
+      host,
+      port: parseInt(port),
+      username,
+      useKeyAuth
+    };
+
+    if (!containerInfo) {
+      if (useKeyAuth) {
+        credentials.privateKey = privateKey;
+        if (passphrase) {
+          credentials.passphrase = passphrase;
+        }
+      } else {
+        credentials.password = password;
+      }
+    }
+
+    // Validate inputs
+    if (!credentials.host?.trim() || !credentials.username?.trim() || 
+        (!credentials.password?.trim() && !credentials.useKeyAuth)) {
       const errorMsg = 'Missing required connection parameters';
       setConnectionError(errorMsg);
       if (term.current) {
@@ -328,28 +420,16 @@ const TerminalComponent = ({
     clearReconnectTimeout();
     
     if (term.current) {
-      term.current.writeln(`\r\n\x1b[33m→ Connecting to ${username}@${host}:${port}...\x1b[0m`);
-    }
-
-    const credentials = {
-      host,
-      port: parseInt(port),
-      username,
-      useKeyAuth
-    };
-
-    if (useKeyAuth) {
-      credentials.privateKey = privateKey;
-      if (passphrase) {
-        credentials.passphrase = passphrase;
+      if (containerInfo) {
+        term.current.writeln(`\r\n\x1b[33m→ Connecting to container ${containerInfo.containerId}...\x1b[0m`);
+      } else {
+        term.current.writeln(`\r\n\x1b[33m→ Connecting to ${credentials.username}@${credentials.host}:${credentials.port}...\x1b[0m`);
       }
-    } else {
-      credentials.password = password;
     }
 
     socket.current.emit('terminal:connect', credentials);
   }, [host, username, password, port, useKeyAuth, privateKey, passphrase, 
-      isConnecting, isConnected, clearReconnectTimeout]);
+      isConnecting, isConnected, clearReconnectTimeout, containerInfo, shouldUseContainer, createContainer]);
 
   // Disconnect from SSH
   const disconnectSSH = useCallback(() => {
@@ -358,6 +438,8 @@ const TerminalComponent = ({
     console.log('[TERMINAL] Disconnecting SSH');
     clearReconnectTimeout();
     autoConnectAttempted.current = false;
+    setContainerInfo(null);
+    setUseContainer(false);
     
     if (socket.current) {
       socket.current.emit('terminal:disconnect');
@@ -439,24 +521,25 @@ const TerminalComponent = ({
 
   // Auto-connect effect
   useEffect(() => {
-    if (autoConnect && socket.current && !isConnected && !isConnecting && 
+    if (autoConnect && socket.current && !isConnected && !isConnecting && !isCreatingContainer &&
         !autoConnectAttempted.current && componentMounted.current && 
         initializationComplete.current) {
       
       console.log('[TERMINAL] Auto-connect triggered');
       autoConnectAttempted.current = true;
       const timer = setTimeout(() => {
-        if (componentMounted.current && !isConnected && !isConnecting) {
+        if (componentMounted.current && !isConnected && !isConnecting && !isCreatingContainer) {
           connectSSH();
         }
       }, 1000);
       
       return () => clearTimeout(timer);
     }
-  }, [autoConnect, connectSSH, isConnected, isConnecting]);
+  }, [autoConnect, connectSSH, isConnected, isConnecting, isCreatingContainer]);
 
   // Helper functions
   const getStatusColor = () => {
+    if (isCreatingContainer) return '#f39c12';
     if (isConnecting) return '#f39c12';
     if (isConnected) return '#2ecc71';
     if (connectionError) return '#e74c3c';
@@ -464,7 +547,13 @@ const TerminalComponent = ({
   };
 
   const getConnectionInfo = () => {
+    if (isCreatingContainer) {
+      return 'Creating container...';
+    }
     if (isConnected) {
+      if (containerInfo) {
+        return `Container ${containerInfo.containerId.substring(0, 8)}... (${containerInfo.host}:${containerInfo.port})`;
+      }
       return `${username}@${host}:${port}`;
     }
     if (connectionError) {
@@ -474,6 +563,13 @@ const TerminalComponent = ({
       return 'Connecting...';
     }
     return 'Not connected';
+  };
+
+  const getConnectButtonText = () => {
+    if (isCreatingContainer) return 'Creating...';
+    if (isConnecting) return 'Connecting...';
+    if (shouldUseContainer() && !containerInfo) return 'Create Container';
+    return 'Connect';
   };
 
   if (!show) {
@@ -513,11 +609,22 @@ const TerminalComponent = ({
             height: '10px',
             borderRadius: '50%',
             backgroundColor: getStatusColor(),
-            boxShadow: isConnected ? `0 0 6px ${getStatusColor()}` : 'none'
+            boxShadow: (isConnected || isCreatingContainer) ? `0 0 6px ${getStatusColor()}` : 'none'
           }} />
           <span style={{ color: themes[theme]?.foreground || '#ffffff', fontWeight: '500' }}>
             {connectionStatus}
           </span>
+          {(containerInfo || useContainer) && (
+            <span style={{ 
+              fontSize: '11px', 
+              color: '#999',
+              backgroundColor: '#464647',
+              padding: '2px 6px',
+              borderRadius: '3px'
+            }}>
+              CONTAINER
+            </span>
+          )}
         </div>
         
         <div style={{ 
@@ -533,11 +640,11 @@ const TerminalComponent = ({
         </div>
         
         <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto' }}>
-          {!isConnected && !isConnecting && (
+          {!isConnected && !isConnecting && !isCreatingContainer && (
             <button
               onClick={connectSSH}
               style={{
-                backgroundColor: '#3498db',
+                backgroundColor: shouldUseContainer() && !containerInfo ? '#9b59b6' : '#3498db',
                 color: 'white',
                 border: 'none',
                 borderRadius: '4px',
@@ -546,14 +653,18 @@ const TerminalComponent = ({
                 cursor: 'pointer',
                 transition: 'background-color 0.2s'
               }}
-              onMouseEnter={(e) => e.target.style.backgroundColor = '#2980b9'}
-              onMouseLeave={(e) => e.target.style.backgroundColor = '#3498db'}
+              onMouseEnter={(e) => {
+                e.target.style.backgroundColor = shouldUseContainer() && !containerInfo ? '#8e44ad' : '#2980b9';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.backgroundColor = shouldUseContainer() && !containerInfo ? '#9b59b6' : '#3498db';
+              }}
             >
-              Connect
+              {getConnectButtonText()}
             </button>
           )}
           
-          {(isConnected || isConnecting) && (
+          {(isConnected || isConnecting || isCreatingContainer) && (
             <button
               onClick={disconnectSSH}
               style={{
@@ -569,7 +680,7 @@ const TerminalComponent = ({
               onMouseEnter={(e) => e.target.style.backgroundColor = '#c0392b'}
               onMouseLeave={(e) => e.target.style.backgroundColor = '#e74c3c'}
             >
-              {isConnecting ? 'Cancel' : 'Disconnect'}
+              {isCreatingContainer ? 'Cancel' : isConnecting ? 'Cancel' : 'Disconnect'}
             </button>
           )}
           
@@ -906,7 +1017,8 @@ const ResizableTerminal = ({
           bottom: 0,
           cursor: isResizing ? 'row-resize' : 'col-resize',
           backgroundColor: 'rgba(0, 0, 0, 0.1)',
-          zIndex: 9999
+          zIndex: 9999,
+          pointerEvents: 'auto'
         }} />
       )}
     </div>
