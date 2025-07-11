@@ -5,7 +5,7 @@ import { FitAddon } from 'xterm-addon-fit';
 import io from 'socket.io-client';
 import 'xterm/css/xterm.css';
 
-// Original TerminalComponent with Container Support
+// Original TerminalComponent with Session Persistence
 const TerminalComponent = ({ 
   show = true, 
   host = 'localhost', 
@@ -22,7 +22,8 @@ const TerminalComponent = ({
   theme = 'dark',
   useKeyAuth = false,
   privateKey = '',
-  passphrase = ''
+  passphrase = '',
+  maintainSession = false // NEW: Keep session alive when hidden
 }) => {
   const terminalRef = useRef(null);
   const term = useRef(null);
@@ -33,6 +34,7 @@ const TerminalComponent = ({
   const reconnectTimeout = useRef(null);
   const componentMounted = useRef(true);
   const initializationComplete = useRef(false);
+  const sessionActive = useRef(false); // Track if session should persist
   
   const [isConnected, setIsConnected] = useState(externalIsConnected);
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
@@ -126,7 +128,7 @@ const TerminalComponent = ({
     if (terminalRef.current) {
       resizeObserver.current.observe(terminalRef.current);
     }
-  }, []);
+  }, []); // Remove show dependency
 
   // Check if should use container (when fields are empty)
   const shouldUseContainer = useCallback(() => {
@@ -135,7 +137,7 @@ const TerminalComponent = ({
 
   // Initialize terminal
   const initializeTerminal = useCallback(() => {
-    if (!terminalRef.current || !componentMounted.current || initializationComplete.current) {
+    if (!terminalRef.current || !componentMounted.current || initializationComplete.current || !show) {
       return;
     }
 
@@ -188,29 +190,29 @@ const TerminalComponent = ({
     });
 
     setTimeout(() => {
-      if (fitAddon.current && componentMounted.current) {
+      if (fitAddon.current && componentMounted.current && show) {
         try {
           fitAddon.current.fit();
         } catch (error) {
           console.warn('Initial fit error:', error);
         }
       }
-      if (term.current && componentMounted.current) {
+      if (term.current && componentMounted.current && show) {
         term.current.focus();
       }
     }, 100);
 
     initializationComplete.current = true;
     console.log('[TERMINAL] Terminal initialized successfully');
-  }, [theme, handleLocalInput]);
+  }, [theme, handleLocalInput, show]);
 
-  // Setup socket connection
+  // Setup socket connection - PERSISTENT (not affected by show/hide)
   const setupSocketConnection = useCallback(() => {
     if (!componentMounted.current || socket.current) {
       return;
     }
 
-    console.log('[TERMINAL] Setting up socket connection');
+    console.log('[TERMINAL] Setting up persistent socket connection');
 
     socket.current = io(window.location.origin, {
       forceNew: true,
@@ -222,7 +224,7 @@ const TerminalComponent = ({
     socket.current.on('connect', () => {
       if (!componentMounted.current) return;
       console.log('[TERMINAL] Socket connected to server');
-      if (term.current) {
+      if (term.current && show) {
         term.current.writeln('\r\n\x1b[32m✓ Connected to server\x1b[0m');
       }
     });
@@ -231,7 +233,7 @@ const TerminalComponent = ({
       if (!componentMounted.current) return;
       console.log('[TERMINAL] Socket connection error:', error.message);
       setConnectionError(`Server connection failed: ${error.message}`);
-      if (term.current) {
+      if (term.current && show) {
         term.current.writeln(`\r\n\x1b[31m✗ Server connection failed: ${error.message}\x1b[0m`);
       }
     });
@@ -244,10 +246,11 @@ const TerminalComponent = ({
       setIsConnecting(false);
       setIsCreatingContainer(false);
       clearReconnectTimeout();
+      sessionActive.current = false;
       onStatusChange?.('disconnected');
       onDisconnect?.();
       
-      if (term.current) {
+      if (term.current && show) {
         term.current.writeln(`\r\n\x1b[31m✗ Disconnected from server (${reason})\x1b[0m`);
       }
     });
@@ -258,7 +261,7 @@ const TerminalComponent = ({
       console.log('[TERMINAL] Container creation started');
       setIsCreatingContainer(true);
       setConnectionStatus('Creating container...');
-      if (term.current) {
+      if (term.current && show) {
         term.current.writeln('\r\n\x1b[33m→ Creating your container...\x1b[0m');
       }
     });
@@ -269,7 +272,7 @@ const TerminalComponent = ({
       setContainerInfo(data);
       setIsCreatingContainer(false);
       setConnectionStatus('Container ready');
-      if (term.current) {
+      if (term.current && show) {
         term.current.writeln(`\r\n\x1b[32m✓ Container created successfully!\x1b[0m`);
         term.current.writeln(`\x1b[90mContainer ID: ${data.containerId}\x1b[0m`);
         term.current.writeln(`\x1b[90mSSH Port: ${data.port}\x1b[0m`);
@@ -279,14 +282,17 @@ const TerminalComponent = ({
 
     socket.current.on('terminal:output', data => {
       if (!componentMounted.current) return;
-      if (term.current) {
+      if (term.current && show) {
         term.current.write(data);
-        setSessionHistory(prev => [...prev.slice(-100), { 
-          type: 'output', 
-          data, 
-          timestamp: Date.now() 
-        }]);
+      } else if (term.current && !show) {
+        // Store data for when terminal becomes visible again
+        term.current.write(data);
       }
+      setSessionHistory(prev => [...prev.slice(-100), { 
+        type: 'output', 
+        data, 
+        timestamp: Date.now() 
+      }]);
     });
 
     socket.current.on('terminal:connected', (data) => {
@@ -297,11 +303,12 @@ const TerminalComponent = ({
       setIsConnecting(false);
       setIsCreatingContainer(false);
       setConnectionError(null);
+      sessionActive.current = true; // Mark session as active
       clearReconnectTimeout();
       onStatusChange?.('connected');
       onConnect?.();
       
-      if (term.current) {
+      if (term.current && show) {
         if (data.containerId) {
           term.current.writeln('\r\n\x1b[32m✓ Connected to your container!\x1b[0m');
           term.current.writeln(`\x1b[90mContainer: ${data.containerId}\x1b[0m`);
@@ -322,7 +329,7 @@ const TerminalComponent = ({
       clearReconnectTimeout();
       onStatusChange?.('error');
       
-      if (term.current) {
+      if (term.current && show) {
         term.current.writeln(`\r\n\x1b[31m✗ SSH Error: ${error.message}\x1b[0m\r\n`);
       }
     });
@@ -334,18 +341,19 @@ const TerminalComponent = ({
       setConnectionStatus('Disconnected');
       setIsConnecting(false);
       setIsCreatingContainer(false);
+      sessionActive.current = false;
       clearReconnectTimeout();
       onStatusChange?.('disconnected');
       onDisconnect?.();
       
-      if (term.current) {
+      if (term.current && show) {
         const reason = data?.reason ? ` (${data.reason})` : '';
         term.current.writeln(`\r\n\x1b[33m✗ SSH session ended${reason}\x1b[0m\r\n`);
       }
     });
 
     console.log('[TERMINAL] Socket event handlers set up');
-  }, [onConnect, onDisconnect, onStatusChange, clearReconnectTimeout]);
+  }, [onConnect, onDisconnect, onStatusChange, clearReconnectTimeout, show]);
 
   // Create container
   const createContainer = useCallback(() => {
@@ -357,12 +365,12 @@ const TerminalComponent = ({
     setConnectionError(null);
     setUseContainer(true);
     
-    if (term.current) {
+    if (term.current && show) {
       term.current.writeln('\r\n\x1b[33m→ Requesting new container...\x1b[0m');
     }
 
     socket.current.emit('terminal:create-container');
-  }, [isCreatingContainer, isConnected]);
+  }, [isCreatingContainer, isConnected, show]);
 
   // Connect to SSH
   const connectSSH = useCallback(() => {
@@ -409,7 +417,7 @@ const TerminalComponent = ({
         (!credentials.password?.trim() && !credentials.useKeyAuth)) {
       const errorMsg = 'Missing required connection parameters';
       setConnectionError(errorMsg);
-      if (term.current) {
+      if (term.current && show) {
         term.current.writeln('\r\n\x1b[31m✗ Missing required connection parameters\x1b[0m');
       }
       return;
@@ -419,7 +427,7 @@ const TerminalComponent = ({
     setConnectionStatus('Connecting...');
     clearReconnectTimeout();
     
-    if (term.current) {
+    if (term.current && show) {
       if (containerInfo) {
         term.current.writeln(`\r\n\x1b[33m→ Connecting to container ${containerInfo.containerId}...\x1b[0m`);
       } else {
@@ -429,15 +437,16 @@ const TerminalComponent = ({
 
     socket.current.emit('terminal:connect', credentials);
   }, [host, username, password, port, useKeyAuth, privateKey, passphrase, 
-      isConnecting, isConnected, clearReconnectTimeout, containerInfo, shouldUseContainer, createContainer]);
+      isConnecting, isConnected, clearReconnectTimeout, containerInfo, shouldUseContainer, createContainer, show]);
 
-  // Disconnect from SSH
+  // Disconnect from SSH - EXPLICIT disconnect only
   const disconnectSSH = useCallback(() => {
     if (!componentMounted.current) return;
     
-    console.log('[TERMINAL] Disconnecting SSH');
+    console.log('[TERMINAL] EXPLICIT disconnect requested');
     clearReconnectTimeout();
     autoConnectAttempted.current = false;
+    sessionActive.current = false;
     setContainerInfo(null);
     setUseContainer(false);
     
@@ -448,11 +457,11 @@ const TerminalComponent = ({
 
   // Clear terminal
   const clearTerminal = useCallback(() => {
-    if (term.current && componentMounted.current) {
+    if (term.current && componentMounted.current && show) {
       term.current.clear();
       term.current.writeln('\x1b[32mTerminal cleared\x1b[0m\r\n');
     }
-  }, []);
+  }, [show]);
 
   // Download session log
   const downloadLog = useCallback(() => {
@@ -479,51 +488,71 @@ const TerminalComponent = ({
     return () => {
       console.log('[TERMINAL] Component unmounting');
       componentMounted.current = false;
-      initializationComplete.current = false;
+      
+      // ONLY disconnect if session is not meant to persist or maintainSession is false
+      if (!maintainSession && !sessionActive.current) {
+        initializationComplete.current = false;
+      }
     };
-  }, []);
+  }, [maintainSession]);
 
-  // Main initialization effect
+  // Initialize socket connection (PERSISTENT - not affected by show/hide)
   useEffect(() => {
-    if (!show || !componentMounted.current || initializationComplete.current) {
-      return;
-    }
+    if (!componentMounted.current) return;
     
-    console.log('[TERMINAL] Running main initialization effect');
-    
-    initializeTerminal();
+    console.log('[TERMINAL] Setting up persistent connection');
     setupSocketConnection();
     
     return () => {
-      console.log('[TERMINAL] Main effect cleanup');
+      console.log('[TERMINAL] Cleaning up socket connection');
       clearReconnectTimeout();
       autoConnectAttempted.current = false;
       
-      if (socket.current) {
-        socket.current.emit('terminal:disconnect');
-        socket.current.disconnect();
-        socket.current = null;
+      // ONLY disconnect socket if not maintaining session
+      if (!maintainSession) {
+        if (socket.current) {
+          socket.current.emit('terminal:disconnect');
+          socket.current.disconnect();
+          socket.current = null;
+        }
+        initializationComplete.current = false;
       }
-      
-      if (term.current) {
-        term.current.dispose();
-        term.current = null;
-      }
-      
-      if (resizeObserver.current) {
-        resizeObserver.current.disconnect();
-        resizeObserver.current = null;
-      }
-      
-      initializationComplete.current = false;
     };
-  }, [show]);
+  }, [maintainSession]);
+
+  // Terminal UI initialization (affected by show/hide)
+  useEffect(() => {
+    if (!show || !componentMounted.current) {
+      // Don't dispose terminal when minimizing - just hide it
+      return;
+    }
+    
+    // Initialize or re-initialize terminal UI when shown
+    if (!initializationComplete.current) {
+      initializeTerminal();
+      setupResizeObserver();
+    } else if (term.current) {
+      // Terminal exists but might need to be refitted and focused
+      setTimeout(() => {
+        if (fitAddon.current && componentMounted.current && show && terminalRef.current) {
+          try {
+            fitAddon.current.fit();
+          } catch (error) {
+            console.warn('Refit error:', error);
+          }
+        }
+        if (term.current && componentMounted.current && show) {
+          term.current.focus();
+        }
+      }, 100);
+    }
+    
+  }, [show, initializeTerminal, setupResizeObserver, maintainSession]);
 
   // Auto-connect effect
   useEffect(() => {
     if (autoConnect && socket.current && !isConnected && !isConnecting && !isCreatingContainer &&
-        !autoConnectAttempted.current && componentMounted.current && 
-        initializationComplete.current) {
+        !autoConnectAttempted.current && componentMounted.current && show) {
       
       console.log('[TERMINAL] Auto-connect triggered');
       autoConnectAttempted.current = true;
@@ -535,7 +564,7 @@ const TerminalComponent = ({
       
       return () => clearTimeout(timer);
     }
-  }, [autoConnect, connectSSH, isConnected, isConnecting, isCreatingContainer]);
+  }, [autoConnect, connectSSH, isConnected, isConnecting, isCreatingContainer, show]);
 
   // Helper functions
   const getStatusColor = () => {
@@ -743,7 +772,7 @@ const TerminalComponent = ({
   );
 };
 
-// New ResizableTerminal component that wraps TerminalComponent
+// Fixed ResizableTerminal component with session persistence
 const ResizableTerminal = ({
   host = 'localhost',
   username = 'vboxuser',
@@ -817,7 +846,16 @@ const ResizableTerminal = ({
   }, [isResizing, isResizingWidth, minHeight, maxHeight, minWidth, maxWidth]);
 
   const toggleTerminal = () => {
-    setIsTerminalOpen(!isTerminalOpen);
+    const newOpenState = !isTerminalOpen;
+    setIsTerminalOpen(newOpenState);
+    
+    // When opening the terminal, ensure it refits properly
+    if (newOpenState) {
+      setTimeout(() => {
+        // Trigger a resize event to refit the terminal
+        window.dispatchEvent(new Event('resize'));
+      }, 100);
+    }
   };
 
   return (
@@ -971,40 +1009,42 @@ const ResizableTerminal = ({
                   e.target.style.backgroundColor = 'transparent';
                   e.target.style.opacity = '0.7';
                 }}
-                title="Close Panel"
+                title="Minimize Panel"
               >
-                ✕
+                −
               </button>
             </div>
           )}
         </div>
 
-        {/* Terminal Content */}
-        {isTerminalOpen && (
-          <div style={{
-            flex: 1,
-            backgroundColor: '#1e1e1e',
-            overflow: 'hidden'
-          }}>
-            <TerminalComponent 
-              show={true}
-              host={host}
-              username={username}
-              password={password}
-              port={port}
-              autoConnect={autoConnect}
-              theme={theme}
-              onConnect={onConnect}
-              onDisconnect={onDisconnect}
-              onStatusChange={onStatusChange}
-              style={{
-                height: '100%',
-                border: 'none',
-                borderRadius: '0'
-              }}
-            />
-          </div>
-        )}
+        {/* Terminal Content - ALWAYS RENDERED to maintain session */}
+        <div style={{
+          flex: 1,
+          backgroundColor: '#1e1e1e',
+          overflow: 'hidden',
+          visibility: isTerminalOpen ? 'visible' : 'hidden', // Use visibility instead of display
+          height: isTerminalOpen ? 'auto' : '0'
+        }}>
+          <TerminalComponent 
+            show={true} // ALWAYS show to maintain terminal state
+            maintainSession={true} // KEEP SESSION ALIVE when hidden
+            host={host}
+            username={username}
+            password={password}
+            port={port}
+            autoConnect={autoConnect}
+            theme={theme}
+            onConnect={onConnect}
+            onDisconnect={onDisconnect}
+            onStatusChange={onStatusChange}
+            style={{
+              height: '100%',
+              border: 'none',
+              borderRadius: '0',
+              visibility: isTerminalOpen ? 'visible' : 'hidden'
+            }}
+          />
+        </div>
       </div>
 
       {/* Resizing overlay */}
