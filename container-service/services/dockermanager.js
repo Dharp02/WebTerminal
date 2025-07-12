@@ -1,9 +1,7 @@
-// server/dockerManager.js
-import { Meteor } from 'meteor/meteor';
-import { spawn } from 'child_process';
-import { promisify } from 'util';
+// container-service/services/dockerManager.js
+const { spawn } = require('child_process');
 
-export class DockerManager {
+class DockerManager {
   constructor() {
     this.activeContainers = new Map();
     this.cleanupInterval = null;
@@ -294,7 +292,8 @@ CMD ["/usr/sbin/sshd", "-D"]`;
 
   // Start cleanup interval for idle containers
   startCleanupInterval() {
-    this.cleanupInterval = Meteor.setInterval(() => {
+    // Use regular setInterval instead of Meteor.setInterval
+    this.cleanupInterval = setInterval(() => {
       this.cleanupIdleContainers();
     }, 10 * 60 * 1000); // Every 10 minutes
   }
@@ -365,7 +364,7 @@ CMD ["/usr/sbin/sshd", "-D"]`;
     console.log('[DOCKER] Shutting down Docker manager...');
     
     if (this.cleanupInterval) {
-      Meteor.clearInterval(this.cleanupInterval);
+      clearInterval(this.cleanupInterval); // Use regular clearInterval
     }
     
     const shutdownPromises = [];
@@ -382,12 +381,4 @@ CMD ["/usr/sbin/sshd", "-D"]`;
   }
 }
 
-// Export singleton instance
-let dockerManagerInstance = null;
-
-export const getDockerManager = () => {
-  if (!dockerManagerInstance) {
-    dockerManagerInstance = new DockerManager();
-  }
-  return dockerManagerInstance;
-};
+module.exports = { DockerManager };
