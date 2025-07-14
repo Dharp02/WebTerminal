@@ -4,7 +4,9 @@ import { WebApp } from 'meteor/webapp';
 import { Server } from 'socket.io';
 import { Client } from 'ssh2';
 
+import fetch from 'node-fetch';
 // Container service configuration
+// At the top of server/main.js
 const CONTAINER_SERVICE_URL = process.env.CONTAINER_SERVICE_URL || 'http://localhost:3001';
 
 // Terminal server class for handling SSH connections
