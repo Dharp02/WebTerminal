@@ -44,6 +44,7 @@ const TerminalComponent = ({
   const [containerInfo, setContainerInfo] = useState(null);
   const [isCreatingContainer, setIsCreatingContainer] = useState(false);
   const [useContainer, setUseContainer] = useState(false);
+  const [sessionEnded, setSessionEnded] = useState(false); // NEW: Track if session was ended
 
   // Terminal themes
   const themes = {
@@ -130,10 +131,13 @@ const TerminalComponent = ({
     }
   }, []);
 
-  // Check if should use container (when fields are empty)
+  // Check if should use container (when fields are empty AND session not ended)
   const shouldUseContainer = useCallback(() => {
+    if (sessionEnded) {
+      return false; // Don't create containers if session was ended
+    }
     return !host.trim() || host === 'localhost' && !username.trim() && !password.trim();
-  }, [host, username, password]);
+  }, [host, username, password, sessionEnded]);
 
   // Initialize terminal
   const initializeTerminal = useCallback(() => {
@@ -385,6 +389,17 @@ const TerminalComponent = ({
     console.log('[TERMINAL] Starting connection process');
     setConnectionError(null);
 
+    // Check if session was ended - prevent container creation
+    if (sessionEnded && shouldUseContainer()) {
+      const errorMsg = 'Container session was ended. Please restart the server to create new containers.';
+      setConnectionError(errorMsg);
+      if (term.current && show) {
+        term.current.writeln('\r\n\x1b[31m✗ Container session was ended\x1b[0m');
+        term.current.writeln('\x1b[90mPlease restart the server to create new containers.\x1b[0m\r\n');
+      }
+      return;
+    }
+
     // Check if we should use container mode (empty/default fields)
     if (shouldUseContainer() && !containerInfo) {
       // Automatically create container without user interaction
@@ -444,7 +459,7 @@ const TerminalComponent = ({
     socket.current.emit('terminal:connect', credentials);
   }, [host, username, password, port, useKeyAuth, privateKey, passphrase, 
       isConnecting, isConnected, clearReconnectTimeout, containerInfo, 
-      shouldUseContainer, createContainer, show]);
+      shouldUseContainer, createContainer, show, sessionEnded]);
 
   // Disconnect from SSH - EXPLICIT disconnect only (keeps container alive)
   const disconnectSSH = useCallback(() => {
@@ -545,16 +560,17 @@ const TerminalComponent = ({
         socket.current.emit('terminal:disconnect');
       }
       
-      // Clear all session data
+      // Clear all session data and mark session as ended
       clearReconnectTimeout();
       autoConnectAttempted.current = false;
       sessionActive.current = false;
       setContainerInfo(null);
       setUseContainer(false);
+      setSessionEnded(true); // Mark session as ended - prevents new containers
       setConnectionStatus('Session Ended');
       
       if (term.current && show) {
-        term.current.writeln('\x1b[90mContainer has been destroyed. Click Connect to create a new one.\x1b[0m\r\n');
+        term.current.writeln('\x1b[90mContainer has been destroyed. Restart server to create new containers.\x1b[0m\r\n');
       }
       
     } catch (error) {
