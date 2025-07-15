@@ -5,7 +5,7 @@ import { FitAddon } from 'xterm-addon-fit';
 import io from 'socket.io-client';
 import 'xterm/css/xterm.css';
 
-// Original TerminalComponent with Session Persistence
+// Original TerminalComponent with Session Persistence - No Manual Container Creation
 const TerminalComponent = ({ 
   show = true, 
   host = 'localhost', 
@@ -23,7 +23,7 @@ const TerminalComponent = ({
   useKeyAuth = false,
   privateKey = '',
   passphrase = '',
-  maintainSession = false // NEW: Keep session alive when hidden
+  maintainSession = false
 }) => {
   const terminalRef = useRef(null);
   const term = useRef(null);
@@ -34,7 +34,7 @@ const TerminalComponent = ({
   const reconnectTimeout = useRef(null);
   const componentMounted = useRef(true);
   const initializationComplete = useRef(false);
-  const sessionActive = useRef(false); // Track if session should persist
+  const sessionActive = useRef(false);
   
   const [isConnected, setIsConnected] = useState(externalIsConnected);
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
@@ -44,6 +44,7 @@ const TerminalComponent = ({
   const [containerInfo, setContainerInfo] = useState(null);
   const [isCreatingContainer, setIsCreatingContainer] = useState(false);
   const [useContainer, setUseContainer] = useState(false);
+  const [sessionEnded, setSessionEnded] = useState(false); // NEW: Track if session was ended
 
   // Terminal themes
   const themes = {
@@ -128,12 +129,15 @@ const TerminalComponent = ({
     if (terminalRef.current) {
       resizeObserver.current.observe(terminalRef.current);
     }
-  }, []); // Remove show dependency
+  }, []);
 
-  // Check if should use container (when fields are empty)
+  // Check if should use container (when fields are empty AND session not ended)
   const shouldUseContainer = useCallback(() => {
+    if (sessionEnded) {
+      return false; // Don't create containers if session was ended
+    }
     return !host.trim() || host === 'localhost' && !username.trim() && !password.trim();
-  }, [host, username, password]);
+  }, [host, username, password, sessionEnded]);
 
   // Initialize terminal
   const initializeTerminal = useCallback(() => {
@@ -285,7 +289,6 @@ const TerminalComponent = ({
       if (term.current && show) {
         term.current.write(data);
       } else if (term.current && !show) {
-        // Store data for when terminal becomes visible again
         term.current.write(data);
       }
       setSessionHistory(prev => [...prev.slice(-100), { 
@@ -303,7 +306,7 @@ const TerminalComponent = ({
       setIsConnecting(false);
       setIsCreatingContainer(false);
       setConnectionError(null);
-      sessionActive.current = true; // Mark session as active
+      sessionActive.current = true;
       clearReconnectTimeout();
       onStatusChange?.('connected');
       onConnect?.();
@@ -346,6 +349,11 @@ const TerminalComponent = ({
       onStatusChange?.('disconnected');
       onDisconnect?.();
       
+      // Don't auto-reconnect on manual disconnect
+      if (data?.reason === 'manual_disconnect') {
+        autoConnectAttempted.current = true; // Prevent auto-reconnect
+      }
+      
       if (term.current && show) {
         const reason = data?.reason ? ` (${data.reason})` : '';
         term.current.writeln(`\r\n\x1b[33m✗ SSH session ended${reason}\x1b[0m\r\n`);
@@ -355,13 +363,13 @@ const TerminalComponent = ({
     console.log('[TERMINAL] Socket event handlers set up');
   }, [onConnect, onDisconnect, onStatusChange, clearReconnectTimeout, show]);
 
-  // Create container
+  // Create container (automatically called, no manual button)
   const createContainer = useCallback(() => {
     if (!componentMounted.current || !socket.current || isCreatingContainer || isConnected) {
       return;
     }
 
-    console.log('[TERMINAL] Creating new container');
+    console.log('[TERMINAL] Auto-creating container for empty connection fields');
     setConnectionError(null);
     setUseContainer(true);
     
@@ -372,17 +380,30 @@ const TerminalComponent = ({
     socket.current.emit('terminal:create-container');
   }, [isCreatingContainer, isConnected, show]);
 
-  // Connect to SSH
+  // Connect to SSH - Updated to automatically handle container creation
   const connectSSH = useCallback(() => {
     if (!componentMounted.current || !socket.current || isConnecting || isConnected) {
       return;
     }
 
-    console.log('[TERMINAL] Starting SSH connection');
+    console.log('[TERMINAL] Starting connection process');
     setConnectionError(null);
 
-    // Check if we should use container mode
+    // Check if session was ended - prevent container creation
+    if (sessionEnded && shouldUseContainer()) {
+      const errorMsg = 'Container session was ended. Please restart the server to create new containers.';
+      setConnectionError(errorMsg);
+      if (term.current && show) {
+        term.current.writeln('\r\n\x1b[31m✗ Container session was ended\x1b[0m');
+        term.current.writeln('\x1b[90mPlease restart the server to create new containers.\x1b[0m\r\n');
+      }
+      return;
+    }
+
+    // Check if we should use container mode (empty/default fields)
     if (shouldUseContainer() && !containerInfo) {
+      // Automatically create container without user interaction
+      console.log('[TERMINAL] Empty connection fields detected - auto-creating container');
       createContainer();
       return;
     }
@@ -412,9 +433,9 @@ const TerminalComponent = ({
       }
     }
 
-    // Validate inputs
-    if (!credentials.host?.trim() || !credentials.username?.trim() || 
-        (!credentials.password?.trim() && !credentials.useKeyAuth)) {
+    // Validate inputs for direct SSH connections
+    if (!containerInfo && (!credentials.host?.trim() || !credentials.username?.trim() || 
+        (!credentials.password?.trim() && !credentials.useKeyAuth))) {
       const errorMsg = 'Missing required connection parameters';
       setConnectionError(errorMsg);
       if (term.current && show) {
@@ -437,23 +458,128 @@ const TerminalComponent = ({
 
     socket.current.emit('terminal:connect', credentials);
   }, [host, username, password, port, useKeyAuth, privateKey, passphrase, 
-      isConnecting, isConnected, clearReconnectTimeout, containerInfo, shouldUseContainer, createContainer, show]);
+      isConnecting, isConnected, clearReconnectTimeout, containerInfo, 
+      shouldUseContainer, createContainer, show, sessionEnded]);
 
-  // Disconnect from SSH - EXPLICIT disconnect only
+  // Disconnect from SSH - EXPLICIT disconnect only (keeps container alive)
   const disconnectSSH = useCallback(() => {
     if (!componentMounted.current) return;
     
-    console.log('[TERMINAL] EXPLICIT disconnect requested');
+    console.log('[TERMINAL] EXPLICIT disconnect requested (container preserved)');
     clearReconnectTimeout();
     autoConnectAttempted.current = false;
     sessionActive.current = false;
-    setContainerInfo(null);
-    setUseContainer(false);
+    
+    // Set a flag to prevent auto-reconnection
+    const wasAutoConnect = autoConnect;
+    
+    // DON'T clear containerInfo - keep it for manual reconnection
+    setIsConnecting(false);
+    setIsConnected(false);
+    setConnectionStatus('Disconnected');
     
     if (socket.current) {
       socket.current.emit('terminal:disconnect');
     }
-  }, [clearReconnectTimeout]);
+    
+    if (term.current && show) {
+      term.current.writeln('\r\n\x1b[33m✓ Disconnected (container preserved)\x1b[0m');
+      if (containerInfo) {
+        term.current.writeln('\x1b[90mUse Reconnect to return to your container, or End Session to destroy it.\x1b[0m\r\n');
+      }
+    }
+  }, [clearReconnectTimeout, containerInfo, show]);
+
+  // Reconnect to existing container
+  const reconnectSSH = useCallback(() => {
+    if (!componentMounted.current || !containerInfo) return;
+    
+    console.log('[TERMINAL] Reconnecting to existing container:', containerInfo.containerId);
+    setConnectionError(null);
+    
+    // Reset auto-connect flag for this manual reconnection
+    autoConnectAttempted.current = false;
+    
+    if (term.current && show) {
+      term.current.writeln(`\r\n\x1b[33m→ Reconnecting to container ${containerInfo.containerId}...\x1b[0m`);
+    }
+    
+    // Use existing container credentials
+    const credentials = {
+      host: containerInfo.host,
+      port: containerInfo.port,
+      username: containerInfo.username,
+      password: containerInfo.password,
+      containerId: containerInfo.containerId
+    };
+    
+    setIsConnecting(true);
+    setConnectionStatus('Reconnecting...');
+    
+    socket.current.emit('terminal:connect', credentials);
+  }, [containerInfo, show]);
+
+  // End session permanently (destroys container)
+  const endSession = useCallback(async () => {
+    if (!componentMounted.current) return;
+    
+    console.log('[TERMINAL] Ending session permanently - destroying container');
+    
+    try {
+      // If we have container info, call the container service to end the session
+      if (containerInfo && containerInfo.containerId) {
+        if (term.current && show) {
+          term.current.writeln('\r\n\x1b[33m→ Ending session and destroying container...\x1b[0m');
+        }
+        
+        // Call container service API to end session
+        const response = await fetch('/api/containers/end-session', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            sessionId: socket.current?.id || 'unknown'
+          })
+        });
+        
+        if (response.ok) {
+          const result = await response.json();
+          console.log('[TERMINAL] Session ended successfully:', result);
+          
+          if (term.current && show) {
+            term.current.writeln('\r\n\x1b[32m✓ Session ended and container destroyed\x1b[0m');
+          }
+        } else {
+          console.error('[TERMINAL] Failed to end session via API');
+        }
+      }
+      
+      // Disconnect SSH and clear everything
+      if (socket.current) {
+        socket.current.emit('terminal:disconnect');
+      }
+      
+      // Clear all session data and mark session as ended
+      clearReconnectTimeout();
+      autoConnectAttempted.current = false;
+      sessionActive.current = false;
+      setContainerInfo(null);
+      setUseContainer(false);
+      setSessionEnded(true); // Mark session as ended - prevents new containers
+      setConnectionStatus('Session Ended');
+      
+      if (term.current && show) {
+        term.current.writeln('\x1b[90mContainer has been destroyed. Restart server to create new containers.\x1b[0m\r\n');
+      }
+      
+    } catch (error) {
+      console.error('[TERMINAL] Error ending session:', error);
+      if (term.current && show) {
+        term.current.writeln(`\r\n\x1b[31m✗ Error ending session: ${error.message}\x1b[0m`);
+      }
+    }
+  }, [containerInfo, clearReconnectTimeout, show]);
 
   // Clear terminal
   const clearTerminal = useCallback(() => {
@@ -489,7 +615,6 @@ const TerminalComponent = ({
       console.log('[TERMINAL] Component unmounting');
       componentMounted.current = false;
       
-      // ONLY disconnect if session is not meant to persist or maintainSession is false
       if (!maintainSession && !sessionActive.current) {
         initializationComplete.current = false;
       }
@@ -508,7 +633,6 @@ const TerminalComponent = ({
       clearReconnectTimeout();
       autoConnectAttempted.current = false;
       
-      // ONLY disconnect socket if not maintaining session
       if (!maintainSession) {
         if (socket.current) {
           socket.current.emit('terminal:disconnect');
@@ -518,21 +642,18 @@ const TerminalComponent = ({
         initializationComplete.current = false;
       }
     };
-  }, [maintainSession]);
+  }, [maintainSession, setupSocketConnection, clearReconnectTimeout]);
 
   // Terminal UI initialization (affected by show/hide)
   useEffect(() => {
     if (!show || !componentMounted.current) {
-      // Don't dispose terminal when minimizing - just hide it
       return;
     }
     
-    // Initialize or re-initialize terminal UI when shown
     if (!initializationComplete.current) {
       initializeTerminal();
       setupResizeObserver();
     } else if (term.current) {
-      // Terminal exists but might need to be refitted and focused
       setTimeout(() => {
         if (fitAddon.current && componentMounted.current && show && terminalRef.current) {
           try {
@@ -549,22 +670,23 @@ const TerminalComponent = ({
     
   }, [show, initializeTerminal, setupResizeObserver, maintainSession]);
 
-  // Auto-connect effect
+  // Auto-connect effect - ONLY for initial connection, NOT for reconnections
   useEffect(() => {
     if (autoConnect && socket.current && !isConnected && !isConnecting && !isCreatingContainer &&
-        !autoConnectAttempted.current && componentMounted.current && show) {
+        !autoConnectAttempted.current && componentMounted.current && show && !containerInfo) {
       
-      console.log('[TERMINAL] Auto-connect triggered');
+      // Only auto-connect if we don't have an existing container (fresh start)
+      console.log('[TERMINAL] Auto-connect triggered (initial connection only)');
       autoConnectAttempted.current = true;
       const timer = setTimeout(() => {
-        if (componentMounted.current && !isConnected && !isConnecting && !isCreatingContainer) {
+        if (componentMounted.current && !isConnected && !isConnecting && !isCreatingContainer && !containerInfo) {
           connectSSH();
         }
       }, 1000);
       
       return () => clearTimeout(timer);
     }
-  }, [autoConnect, connectSSH, isConnected, isConnecting, isCreatingContainer, show]);
+  }, [autoConnect, connectSSH, isConnected, isConnecting, isCreatingContainer, show, containerInfo]);
 
   // Helper functions
   const getStatusColor = () => {
@@ -597,9 +719,19 @@ const TerminalComponent = ({
   const getConnectButtonText = () => {
     if (isCreatingContainer) return 'Creating...';
     if (isConnecting) return 'Connecting...';
-    if (shouldUseContainer() && !containerInfo) return 'Create Container';
     return 'Connect';
   };
+
+  const getReconnectButtonText = () => {
+    if (isConnecting) return 'Reconnecting...';
+    return 'Reconnect';
+  };
+
+  // Check if we can show reconnect options (disconnected but have container info)
+  const canReconnect = !isConnected && !isConnecting && !isCreatingContainer && containerInfo;
+
+  // Check if we should show normal connect (no container info or session ended)
+  const canConnect = !isConnected && !isConnecting && !isCreatingContainer && !containerInfo;
 
   if (!show) {
     return null;
@@ -669,11 +801,12 @@ const TerminalComponent = ({
         </div>
         
         <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto' }}>
-          {!isConnected && !isConnecting && !isCreatingContainer && (
+          {/* Normal Connect Button (for new connections) */}
+          {canConnect && (
             <button
               onClick={connectSSH}
               style={{
-                backgroundColor: shouldUseContainer() && !containerInfo ? '#9b59b6' : '#3498db',
+                backgroundColor: '#3498db',
                 color: 'white',
                 border: 'none',
                 borderRadius: '4px',
@@ -683,16 +816,72 @@ const TerminalComponent = ({
                 transition: 'background-color 0.2s'
               }}
               onMouseEnter={(e) => {
-                e.target.style.backgroundColor = shouldUseContainer() && !containerInfo ? '#8e44ad' : '#2980b9';
+                e.target.style.backgroundColor = '#2980b9';
               }}
               onMouseLeave={(e) => {
-                e.target.style.backgroundColor = shouldUseContainer() && !containerInfo ? '#9b59b6' : '#3498db';
+                e.target.style.backgroundColor = '#3498db';
               }}
             >
               {getConnectButtonText()}
             </button>
           )}
+
+          {/* Reconnect Button (when disconnected but container exists) */}
+          {canReconnect && (
+            <button
+              onClick={reconnectSSH}
+              style={{
+                backgroundColor: '#27ae60',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                padding: '4px 8px',
+                fontSize: '11px',
+                cursor: 'pointer',
+                transition: 'background-color 0.2s'
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.backgroundColor = '#229954';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.backgroundColor = '#27ae60';
+              }}
+            >
+              {getReconnectButtonText()}
+            </button>
+          )}
+
+          {/* End Session Button (when disconnected but container exists) */}
+          {canReconnect && (
+            <button
+              onClick={() => {
+                if (confirm('Are you sure you want to end this session? This will destroy your container and all data will be lost.')) {
+                  endSession();
+                }
+              }}
+              style={{
+                backgroundColor: '#e67e22',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                padding: '4px 8px',
+                fontSize: '11px',
+                cursor: 'pointer',
+                transition: 'background-color 0.2s'
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.backgroundColor = '#d35400';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.backgroundColor = '#e67e22';
+              }}
+              title="Destroy container and end session permanently"
+            >
+              End Session
+            </button>
+          )}
           
+          {/* Disconnect Button (when connected) */}
           {(isConnected || isConnecting || isCreatingContainer) && (
             <button
               onClick={disconnectSSH}
@@ -708,6 +897,7 @@ const TerminalComponent = ({
               }}
               onMouseEnter={(e) => e.target.style.backgroundColor = '#c0392b'}
               onMouseLeave={(e) => e.target.style.backgroundColor = '#e74c3c'}
+              title={containerInfo ? "Disconnect (container will remain alive)" : "Disconnect"}
             >
               {isCreatingContainer ? 'Cancel' : isConnecting ? 'Cancel' : 'Disconnect'}
             </button>
