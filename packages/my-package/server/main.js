@@ -1,19 +1,32 @@
+// packages/my-package/server/main.js
 import { Meteor } from 'meteor/meteor';
 import { WebApp } from 'meteor/webapp';
 import { Server } from 'socket.io';
 import { Client } from 'ssh2';
+import { getContainerService } from './container/ContainerService.js';
 
-// Terminal server class for handling SSH connections
+// Use Npm.require for NPM packages in Meteor packages
+let fetch;
+if (Meteor.isServer) {
+  fetch = Npm.require('node-fetch');
+}
+
+// Terminal server class for handling SSH connections with integrated container service
 export class TerminalServer {
   constructor() {
     this.activeSessions = new Map();
     this.io = null;
     this.cleanupInterval = null;
     this.healthInterval = null;
+    this.containerService = null;
     this.initialize();
   }
 
   initialize() {
+    // Initialize container service first
+    this.containerService = getContainerService();
+    this.containerService.mountToWebApp();
+
     // Initialize Socket.IO server
     this.io = new Server(WebApp.httpServer, {
       cors: { 
@@ -39,7 +52,7 @@ export class TerminalServer {
     // Start health monitoring
     this.startHealthMonitoring();
 
-    console.log('Terminal server initialized with health monitoring');
+    console.log('Terminal server initialized with integrated container service');
   }
 
   handleConnection(socket) {
@@ -76,6 +89,45 @@ export class TerminalServer {
       await this.handleSSHConnect(socket, credentials);
     });
 
+    // Handle container creation request - integrated directly
+    socket.on('terminal:create-container', async () => {
+      if (!isSocketConnected) return;
+      
+      try {
+        console.log(`[TERMINAL] Creating container for session: ${socket.id}`);
+        socket.emit('terminal:container-creating', { message: 'Creating your container...' });
+        
+        // Use integrated container service
+        const dockerManager = this.containerService.getDockerManager();
+        const containerInfo = await dockerManager.createSSHContainer();
+        
+        // Associate container with session
+        this.containerService.associateContainerWithSession(containerInfo.containerId, socket.id);
+        
+        console.log(`[TERMINAL] Container created: ${containerInfo.containerId}`);
+        socket.emit('terminal:container-created', containerInfo);
+        
+        // Wait a moment for the container to be fully ready, then connect
+        setTimeout(() => {
+          if (isSocketConnected) {
+            this.handleSSHConnect(socket, {
+              host: containerInfo.host,
+              port: containerInfo.port,
+              username: containerInfo.username,
+              password: containerInfo.password,
+              containerId: containerInfo.containerId
+            });
+          }
+        }, 2000);
+        
+      } catch (error) {
+        console.error('[TERMINAL] Container creation failed:', error);
+        socket.emit('terminal:error', { 
+          message: `Failed to create container: ${error.message}` 
+        });
+      }
+    });
+
     // Handle terminal input
     socket.on('terminal:input', (data) => {
       if (!isSocketConnected) return;
@@ -91,14 +143,15 @@ export class TerminalServer {
     // Handle disconnect request
     socket.on('terminal:disconnect', () => {
       if (!isSocketConnected) return;
-      this.handleSSHDisconnect(socket.id);
+      console.log(`[TERMINAL] User requested disconnect: ${socket.id}`);
+      this.handleSSHDisconnect(socket.id, 'manual_disconnect');
     });
 
     // Handle client disconnect
     socket.on('disconnect', (reason) => {
       isSocketConnected = false;
       console.log(`Terminal client disconnected: ${socket.id}, reason: ${reason}`);
-      this.handleSSHDisconnect(socket.id);
+      this.handleSSHDisconnect(socket.id, 'client_disconnect');
     });
 
     // Handle ping/pong for connection health
@@ -154,8 +207,9 @@ export class TerminalServer {
         connectedAt: new Date(),
         lastActivity: new Date(),
         socketId: socketId,
-        isConnecting: true, // Add connection state flag
-        isConnected: false
+        isConnecting: true,
+        isConnected: false,
+        containerId: credentials.containerId || null
       };
 
       this.activeSessions.set(socketId, session);
@@ -184,51 +238,11 @@ export class TerminalServer {
           width: 640,
           height: 480,
           modes: {
-            // TTY modes for proper terminal behavior
-            1: 0,     // VEOF
-            2: 0,     // VEOL
-            3: 0,     // VERASE
-            4: 0,     // VINTR
-            5: 0,     // VKILL
-            6: 0,     // VQUIT
-            7: 0,     // VSUSP
-            8: 0,     // VSTART
-            9: 0,     // VSTOP
-            10: 1,    // VMIN
-            11: 0,    // VTIME
-            30: 0,    // IGNPAR
-            31: 1,    // PARMRK
-            32: 0,    // INPCK
-            33: 1,    // ISTRIP
-            34: 1,    // INLCR
-            35: 0,    // IGNCR
-            36: 1,    // ICRNL
-            37: 0,    // IUCLC
-            38: 1,    // IXON
-            39: 0,    // IXANY
-            40: 1,    // IXOFF
-            41: 0,    // IMAXBEL
-            50: 1,    // ISIG
-            51: 1,    // ICANON
-            52: 0,    // XCASE
-            53: 1,    // ECHO
-            54: 1,    // ECHOE
-            55: 1,    // ECHOK
-            56: 1,    // ECHONL
-            57: 0,    // NOFLSH
-            58: 1,    // TOSTOP
-            59: 1,    // IEXTEN
-            60: 1,    // ECHOCTL
-            61: 1,    // ECHOKE
-            62: 1,    // PENDIN
-            70: 1,    // OPOST
-            71: 0,    // OLCUC
-            72: 1,    // ONLCR
-            73: 0,    // OCRNL
-            74: 0,    // ONOCR
-            75: 0,    // ONLRET
-            90: 19200, // CS7
-            91: 19200  // CS8
+            1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 10: 1,
+            11: 0, 30: 0, 31: 1, 32: 0, 33: 1, 34: 1, 35: 0, 36: 1, 37: 0,
+            38: 1, 39: 0, 40: 1, 41: 0, 50: 1, 51: 1, 52: 0, 53: 1, 54: 1,
+            55: 1, 56: 1, 57: 0, 58: 1, 59: 1, 60: 1, 61: 1, 62: 1, 70: 1,
+            71: 0, 72: 1, 73: 0, 74: 0, 75: 0, 90: 19200, 91: 19200
           }
         }, (err, stream) => {
           if (err) {
@@ -242,14 +256,21 @@ export class TerminalServer {
           socket.emit('terminal:connected', { 
             host: credentials.host,
             port: credentials.port,
-            username: credentials.username
+            username: credentials.username,
+            containerId: credentials.containerId || null
           });
 
-          // Handle stream data with error checking
+          // Handle stream data
           stream.on('data', (data) => {
             try {
               socket.emit('terminal:output', data.toString());
               session.lastActivity = new Date();
+              
+              // Update container activity if this is a container session
+              if (credentials.containerId) {
+                const dockerManager = this.containerService.getDockerManager();
+                dockerManager.updateContainerActivity(credentials.containerId);
+              }
             } catch (error) {
               console.error('Error sending data to client:', error);
               this.handleSSHDisconnect(socketId);
@@ -340,10 +361,7 @@ export class TerminalServer {
         readyTimeout: 30000,
         keepaliveInterval: 30000,
         keepaliveCountMax: 3,
-        // Enable agent forwarding if available
         agentForward: false,
-        // Disable server host key verification for local development
-        // In production, you should verify host keys properly
         hostVerifier: () => true
       };
 
@@ -371,6 +389,12 @@ export class TerminalServer {
       try {
         session.stream.write(data);
         session.lastActivity = new Date();
+        
+        // Update container activity if this is a container session
+        if (session.containerId) {
+          const dockerManager = this.containerService.getDockerManager();
+          dockerManager.updateContainerActivity(session.containerId);
+        }
       } catch (error) {
         console.error('Error writing to stream:', error);
         this.handleSSHDisconnect(socketId);
@@ -390,26 +414,30 @@ export class TerminalServer {
     }
   }
 
-  handleSSHDisconnect(socketId) {
+  handleSSHDisconnect(socketId, reason = null) {
     const session = this.activeSessions.get(socketId);
     if (session) {
-      console.log(`Cleaning up SSH session for ${socketId}`);
+      console.log(`Cleaning up SSH session for ${socketId}, reason: ${reason || 'unknown'}`);
       
-      // Mark as disconnecting to prevent new operations
       session.isConnecting = false;
       session.isConnected = false;
       
       try {
         if (session.stream && session.stream.writable) {
-          session.stream.removeAllListeners(); // Remove event listeners first
+          session.stream.removeAllListeners();
           session.stream.end();
         }
         if (session.conn) {
-          session.conn.removeAllListeners(); // Remove event listeners first
+          session.conn.removeAllListeners();
           session.conn.end();
         }
       } catch (error) {
         console.error('Error closing SSH connection:', error);
+      }
+      
+      const socket = this.io.sockets.sockets.get(socketId);
+      if (socket && reason) {
+        socket.emit('terminal:disconnected', { reason });
       }
       
       this.activeSessions.delete(socketId);
@@ -421,19 +449,15 @@ export class TerminalServer {
     if (!credentials) {
       return { valid: false, error: 'Credentials are required' };
     }
-
     if (!credentials.host || !credentials.host.trim()) {
       return { valid: false, error: 'Host is required' };
     }
-
     if (!credentials.port || isNaN(credentials.port) || credentials.port < 1 || credentials.port > 65535) {
       return { valid: false, error: 'Valid port number (1-65535) is required' };
     }
-
     if (!credentials.username || !credentials.username.trim()) {
       return { valid: false, error: 'Username is required' };
     }
-
     if (credentials.useKeyAuth) {
       if (!credentials.privateKey || !credentials.privateKey.trim()) {
         return { valid: false, error: 'Private key is required for key authentication' };
@@ -443,21 +467,19 @@ export class TerminalServer {
         return { valid: false, error: 'Password is required' };
       }
     }
-
     return { valid: true };
   }
 
   sanitizeCredentials(credentials) {
-    // Remove sensitive information for logging
     return {
       host: credentials.host,
       port: credentials.port,
       username: credentials.username,
-      useKeyAuth: credentials.useKeyAuth || false
+      useKeyAuth: credentials.useKeyAuth || false,
+      containerId: credentials.containerId || null
     };
   }
 
-  // Get active session statistics
   getSessionStats() {
     const now = new Date();
     const stats = {
@@ -475,19 +497,19 @@ export class TerminalServer {
         port: session.credentials.port,
         username: session.credentials.username,
         connectedAt: session.connectedAt,
-        duration: Math.floor(duration / 1000), // seconds
-        idleTime: Math.floor(idleTime / 1000), // seconds
-        isActive: idleTime < 300000, // 5 minutes
+        duration: Math.floor(duration / 1000),
+        idleTime: Math.floor(idleTime / 1000),
+        isActive: idleTime < 300000,
         isConnecting: session.isConnecting,
-        isConnected: session.isConnected
+        isConnected: session.isConnected,
+        containerId: session.containerId
       });
     }
 
     return stats;
   }
 
-  // Cleanup idle sessions
-  cleanupIdleSessions(maxIdleTime = 30 * 60 * 1000) { // 30 minutes default
+  cleanupIdleSessions(maxIdleTime = 30 * 60 * 1000) {
     const now = new Date();
     const sessionsToCleanup = [];
 
@@ -500,9 +522,8 @@ export class TerminalServer {
 
     sessionsToCleanup.forEach(socketId => {
       console.log(`Cleaning up idle session: ${socketId}`);
-      this.handleSSHDisconnect(socketId);
+      this.handleSSHDisconnect(socketId, 'idle_timeout');
       
-      // Notify client of disconnection
       const socket = this.io.sockets.sockets.get(socketId);
       if (socket) {
         socket.emit('terminal:disconnected', { reason: 'idle_timeout' });
@@ -512,9 +533,7 @@ export class TerminalServer {
     return sessionsToCleanup.length;
   }
 
-  // Add connection health monitoring
   startHealthMonitoring() {
-    // Monitor connection health every 60 seconds
     this.healthInterval = Meteor.setInterval(() => {
       this.checkConnectionHealth();
     }, 60000);
@@ -527,42 +546,37 @@ export class TerminalServer {
     for (const [socketId, session] of this.activeSessions) {
       const socket = this.io.sockets.sockets.get(socketId);
       
-      // Check if socket still exists and is connected
       if (!socket || !socket.connected) {
         console.log(`Removing stale session: ${socketId} (socket disconnected)`);
         staleConnections.push(socketId);
         continue;
       }
       
-      // Check for stuck connecting state
-      if (session.isConnecting && (now - session.connectedAt) > 60000) { // 1 minute
+      if (session.isConnecting && (now - session.connectedAt) > 60000) {
         console.log(`Removing stuck connecting session: ${socketId}`);
         socket.emit('terminal:error', { message: 'Connection timed out' });
         staleConnections.push(socketId);
         continue;
       }
       
-      // Check for inactive connections
       const inactiveTime = now - session.lastActivity;
-      if (inactiveTime > 30 * 60 * 1000) { // 30 minutes
+      if (inactiveTime > 30 * 60 * 1000) {
         console.log(`Removing inactive session: ${socketId}`);
         socket.emit('terminal:disconnected', { reason: 'inactive' });
         staleConnections.push(socketId);
       }
     }
     
-    // Clean up stale connections
     staleConnections.forEach(socketId => {
-      this.handleSSHDisconnect(socketId);
+      this.handleSSHDisconnect(socketId, 'health_check_cleanup');
     });
   }
 
-  // Force disconnect a session
   forceDisconnect(socketId) {
     const session = this.activeSessions.get(socketId);
     if (session) {
       console.log(`Force disconnecting session: ${socketId}`);
-      this.handleSSHDisconnect(socketId);
+      this.handleSSHDisconnect(socketId, 'force_disconnect');
       
       const socket = this.io.sockets.sockets.get(socketId);
       if (socket) {
@@ -575,21 +589,21 @@ export class TerminalServer {
     return false;
   }
 
-  // Get session by socket ID
   getSession(socketId) {
     return this.activeSessions.get(socketId);
   }
 
-  // Get all active sessions
   getAllSessions() {
     return Array.from(this.activeSessions.values());
   }
 
-  // Updated shutdown method
+  getContainerService() {
+    return this.containerService;
+  }
+
   shutdown() {
     console.log('Shutting down terminal server...');
     
-    // Clear intervals
     if (this.cleanupInterval) {
       Meteor.clearInterval(this.cleanupInterval);
     }
@@ -597,7 +611,6 @@ export class TerminalServer {
       Meteor.clearInterval(this.healthInterval);
     }
     
-    // Close all active sessions gracefully
     const disconnectPromises = [];
     for (const [socketId, session] of this.activeSessions) {
       const socket = this.io.sockets.sockets.get(socketId);
@@ -607,15 +620,18 @@ export class TerminalServer {
       
       disconnectPromises.push(
         new Promise(resolve => {
-          this.handleSSHDisconnect(socketId);
+          this.handleSSHDisconnect(socketId, 'server_shutdown');
           resolve();
         })
       );
     }
     
-    // Wait for all disconnections to complete
-    Promise.all(disconnectPromises).then(() => {
-      // Close Socket.IO server
+    Promise.all(disconnectPromises).then(async () => {
+      // Shutdown container service
+      if (this.containerService) {
+        await this.containerService.shutdown();
+      }
+      
       if (this.io) {
         this.io.close();
       }
@@ -631,28 +647,36 @@ export const getTerminalServer = () => {
   if (!terminalServerInstance) {
     terminalServerInstance = new TerminalServer();
   }
-  
   return terminalServerInstance;
 };
 
-// API endpoint for session statistics
+// Enhanced API endpoints with container integration
+
+// Combined terminal and container statistics
 WebApp.connectHandlers.use('/api/terminal-stats', (req, res) => {
   try {
     const server = getTerminalServer();
-    const stats = server.getSessionStats();
+    const terminalStats = server.getSessionStats();
+    const containerStats = server.getContainerService().getServiceStats();
+    
+    const combinedStats = {
+      terminal: terminalStats,
+      containers: containerStats,
+      timestamp: new Date().toISOString()
+    };
     
     res.writeHead(200, { 
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*'
     });
-    res.end(JSON.stringify(stats));
+    res.end(JSON.stringify(combinedStats));
   } catch (error) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: error.message }));
   }
 });
 
-// API endpoint to force disconnect a session
+// Force disconnect session (now with container cleanup)
 WebApp.connectHandlers.use('/api/terminal-disconnect', (req, res) => {
   if (req.method !== 'POST') {
     res.writeHead(405, { 'Content-Type': 'application/json' });
@@ -666,17 +690,39 @@ WebApp.connectHandlers.use('/api/terminal-disconnect', (req, res) => {
       body += chunk.toString();
     });
 
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const { socketId } = JSON.parse(body);
         const server = getTerminalServer();
+        
+        // Get session info before disconnecting
+        const session = server.getSession(socketId);
+        const containerId = session?.containerId;
+        
+        // Force disconnect the terminal session
         const success = server.forceDisconnect(socketId);
+        
+        // If there was a container, stop it too
+        let containerStopped = false;
+        if (containerId) {
+          try {
+            const dockerManager = server.getContainerService().getDockerManager();
+            await dockerManager.stopContainer(containerId);
+            containerStopped = true;
+          } catch (containerError) {
+            console.error('Error stopping container during force disconnect:', containerError);
+          }
+        }
         
         res.writeHead(200, { 
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*'
         });
-        res.end(JSON.stringify({ success, message: success ? 'Session disconnected' : 'Session not found' }));
+        res.end(JSON.stringify({ 
+          success, 
+          message: success ? 'Session disconnected' : 'Session not found',
+          containerStopped
+        }));
       } catch (parseError) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid JSON body' }));
@@ -688,56 +734,25 @@ WebApp.connectHandlers.use('/api/terminal-disconnect', (req, res) => {
   }
 });
 
-// API endpoint to get session details
-WebApp.connectHandlers.use('/api/terminal-session', (req, res) => {
-  try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const socketId = url.searchParams.get('socketId');
-    
-    if (!socketId) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'socketId parameter required' }));
-      return;
-    }
-
-    const server = getTerminalServer();
-    const session = server.getSession(socketId);
-    
-    if (!session) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Session not found' }));
-      return;
-    }
-
-    const sessionInfo = {
-      socketId: session.socketId,
-      credentials: session.credentials,
-      connectedAt: session.connectedAt,
-      lastActivity: session.lastActivity,
-      duration: Date.now() - session.connectedAt.getTime(),
-      isConnecting: session.isConnecting,
-      isConnected: session.isConnected
-    };
-    
-    res.writeHead(200, { 
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*'
-    });
-    res.end(JSON.stringify(sessionInfo));
-  } catch (error) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: error.message }));
-  }
-});
-
-// API endpoint for health check
-WebApp.connectHandlers.use('/api/terminal-health', (req, res) => {
+// Enhanced health check with container service status
+WebApp.connectHandlers.use('/api/terminal-health', async (req, res) => {
   try {
     const server = getTerminalServer();
+    const containerService = server.getContainerService();
+    const dockerManager = containerService.getDockerManager();
+    
+    // Check Docker availability
+    const dockerAvailable = await dockerManager.checkDockerAvailability();
+    
     const health = {
       status: 'healthy',
       uptime: process.uptime(),
       activeSessions: server.activeSessions.size,
+      containerService: {
+        status: 'integrated',
+        activeContainers: dockerManager.activeContainers.size,
+        dockerAvailable
+      },
       timestamp: new Date().toISOString()
     };
     
@@ -759,7 +774,23 @@ WebApp.connectHandlers.use('/api/terminal-health', (req, res) => {
 // Initialize on server startup
 Meteor.startup(() => {
   getTerminalServer();
-  console.log('Terminal server started');
+  console.log('Terminal server started with integrated container service');
+  
+  // Check Docker availability on startup
+  const server = getTerminalServer();
+  const dockerManager = server.getContainerService().getDockerManager();
+  
+  dockerManager.checkDockerAvailability()
+    .then(available => {
+      if (available) {
+        console.log('[STARTUP] Docker is available - container functionality enabled');
+      } else {
+        console.warn('[STARTUP] Docker is not available - container functionality disabled');
+      }
+    })
+    .catch(error => {
+      console.warn('[STARTUP] Error checking Docker availability:', error.message);
+    });
   
   // Graceful shutdown
   process.on('SIGINT', () => {
